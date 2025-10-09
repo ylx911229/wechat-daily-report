@@ -428,7 +428,7 @@ class FeishuService {
   private async processMessages(messages: ChatlogMessage[], appToken: string) {
     // 添加调试信息查看消息结构
     if (messages.length > 0) {
-      console.log('🔍 飞书服务 - 原始消息样例:', messages[0]);
+      console.log('🔍 飞书服务 - 原始消息样例:', messages);
       console.log('🔍 飞书服务 - 所有可用字段:', Object.keys(messages[0]));
       
       // 统计消息类型分布
@@ -545,27 +545,24 @@ class FeishuService {
       processedMessages.push(processedMessage);
     }
     
-    // 第三步：并行执行所有上传任务
+    // 第三步：并行执行所有上传任务（限制并发为5，符合飞书API的5 QPS限制）
     if (uploadTasks.length > 0) {
-      console.log(`🔍 飞书服务 - 开始并行上传 ${uploadTasks.length} 个附件...`);
-      
+      console.log(`🔍 飞书服务 - 开始并行上传 ${uploadTasks.length} 个附件（并发限制：5）...`);
+
       interface UploadResult {
         messageId: string;
         fileToken: string | null;
       }
-      
-              // 只处理第一个任务进行测试
-        // const uploadResults: UploadResult[] = await Promise.all(
-          // [uploadTasks[0]].map(async (task): Promise<UploadResult> => {
-        
-        // 处理所有任务
-        const uploadResults: UploadResult[] = await Promise.all(
-          uploadTasks.map(async (task): Promise<UploadResult> => {
+
+      // 使用并发池控制上传速率
+      const uploadResults: UploadResult[] = await this.executeConcurrentTasks(
+        uploadTasks,
+        async (task): Promise<UploadResult> => {
           try {
             let fileToken: string | null = null;
-            
+
             fileToken = await this.uploadMediaToFeishu(task.localUrl, appToken, task.messageType === WeChatMessageType.IMAGE ? 'image' : 'video');
-            
+
             return {
               messageId: task.messageId,
               fileToken
@@ -577,9 +574,10 @@ class FeishuService {
               fileToken: null
             };
           }
-        })
+        },
+        5 // 最大并发数为5
       );
-      
+
       console.log(`🔍 飞书服务 - 附件上传完成，成功: ${uploadResults.filter(r => r.fileToken).length}/${uploadTasks.length}`);
       
       // 第四步：将上传结果合并回消息
@@ -789,7 +787,7 @@ ${messagesText}`;
   private extractLocalUrl(message: ChatlogMessage): string | null {
     try {
       // 获取图片或视频文件名
-      const mediaFile = message.contents?.imgfile || message.contents?.videofile;
+      const mediaFile = message.contents?.path;
       if (!mediaFile) {
         return null;
       }
@@ -808,10 +806,20 @@ ${messagesText}`;
   // 从本地URL下载文件
   private async downloadFile(url: string): Promise<{ buffer: Uint8Array; filename: string; contentType: string }> {
     try {
-      console.log('🔍 飞书服务 - 开始下载文件:', url);
+      // 优先尝试.dat文件，如果不存在则尝试_t.dat文件
+      let rawUrl = `http://127.0.0.1:5030/data/${url}.dat`;
+      console.log('🔍 飞书服务 - 尝试下载文件:', rawUrl);
 
       // 使用chatlogService获取资源
-      const result = await chatlogService.getResource(url);
+      let result = await chatlogService.getResource(rawUrl);
+
+      // 如果获取失败，尝试_t.dat文件
+      if (!result.success || !result.data) {
+        console.log('🔍 飞书服务 - .dat文件不存在，尝试_t.dat文件');
+        rawUrl = `http://127.0.0.1:5030/data/${url}_t.dat`;
+        console.log('🔍 飞书服务 - 尝试下载文件:', rawUrl);
+        result = await chatlogService.getResource(rawUrl);
+      }
       
       // 检查chatlogService是否返回成功
       if (!result.success || !result.data) {
@@ -834,7 +842,7 @@ ${messagesText}`;
       }
       
       console.log('🔍 飞书服务 - 获取到文件response:', {
-        url, 
+        url: rawUrl, 
         contentType: result.headers?.['content-type'],
         size: buffer.length
       });
@@ -888,7 +896,44 @@ ${messagesText}`;
     if (!fileToken) return '';
     return `https://open.feishu.cn/open-apis/drive/v1/medias/${fileToken}/download`;
   }
-  
+
+  // 并发控制执行任务
+  private async executeConcurrentTasks<T, R>(
+    tasks: T[],
+    executor: (task: T) => Promise<R>,
+    concurrency: number
+  ): Promise<R[]> {
+    const results: R[] = [];
+    const executing: Promise<void>[] = [];
+
+    for (let i = 0; i < tasks.length; i++) {
+      const task = tasks[i];
+
+      // 创建任务执行promise
+      const promise = executor(task).then(result => {
+        results[i] = result;
+      });
+
+      // 添加到正在执行的任务列表
+      const wrappedPromise = promise.then(() => {
+        // 任务完成后从执行列表中移除
+        executing.splice(executing.indexOf(wrappedPromise), 1);
+      });
+
+      executing.push(wrappedPromise);
+
+      // 如果达到并发限制，等待其中一个完成
+      if (executing.length >= concurrency) {
+        await Promise.race(executing);
+      }
+    }
+
+    // 等待所有剩余任务完成
+    await Promise.all(executing);
+
+    return results;
+  }
+
   // 统一上传媒体文件到飞书
   private async uploadMediaToFeishu(fileUrl: string, appToken: string, fileType: 'image' | 'video'): Promise<string | null> {
     try {
