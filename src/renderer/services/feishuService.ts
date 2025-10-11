@@ -804,17 +804,17 @@ ${messagesText}`;
   }
 
   // 从本地URL下载文件
-  private async downloadFile(url: string): Promise<{ buffer: Uint8Array; filename: string; contentType: string }> {
+  private async downloadFile(url: string, fileType: 'image' | 'video'): Promise<{ buffer: Uint8Array; filename: string; contentType: string }> {
     try {
       // 优先尝试.dat文件，如果不存在则尝试_t.dat文件
-      let rawUrl = `http://127.0.0.1:5030/data/${url}.dat`;
+      let rawUrl = fileType === 'image' ? `http://127.0.0.1:5030/data/${url}.dat` : `http://127.0.0.1:5030/data/${url}.mp4`;
       console.log('🔍 飞书服务 - 尝试下载文件:', rawUrl);
 
       // 使用chatlogService获取资源
       let result = await chatlogService.getResource(rawUrl);
 
       // 如果获取失败，尝试_t.dat文件
-      if (!result.success || !result.data) {
+      if ((!result.success || !result.data) && fileType === 'image') {
         console.log('🔍 飞书服务 - .dat文件不存在，尝试_t.dat文件');
         rawUrl = `http://127.0.0.1:5030/data/${url}_t.dat`;
         console.log('🔍 飞书服务 - 尝试下载文件:', rawUrl);
@@ -942,7 +942,7 @@ ${messagesText}`;
       const token = await this.getAccessToken();
       
       // 从chatlogService获取资源
-      const { buffer, filename, contentType } = await this.downloadFile(fileUrl);
+      const { buffer, filename, contentType } = await this.downloadFile(fileUrl, fileType);
       console.log('下载文件完成', fileUrl, buffer.length, filename, contentType);
       
       if (buffer.length === 0) {
